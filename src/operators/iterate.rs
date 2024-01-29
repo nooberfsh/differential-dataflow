@@ -45,6 +45,13 @@ use crate::{Data, Collection};
 use crate::difference::{Semigroup, Abelian};
 use crate::lattice::Lattice;
 
+// 如何判断 iterate 计算完成（或者说，达到 fixpoint）?, 更具体的描述 iterate 是否在 time T 完成计算
+// 一般的判定的方式是在 iterate 后面挂一个 probe, 如何 probe.time > T， 那么说明 iterate 内部不会产生 T 时刻的数据， 继而
+// 说明 iterate 在 time T 已经到达 fixpoint.
+
+// 内部实现原理：
+// iterate 算子由 subgraph 实现， subgraph::output_capabilities 表示内部计算产生的数据对应的时间。
+
 /// An extension trait for the `iterate` method.
 pub trait Iterate<G: Scope, D: Data, R: Semigroup> {
     /// Iteratively apply `logic` to the source collection until convergence.
