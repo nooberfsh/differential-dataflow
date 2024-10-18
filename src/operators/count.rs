@@ -4,9 +4,9 @@ use timely::order::TotalOrder;
 use timely::dataflow::*;
 use timely::dataflow::operators::Operator;
 use timely::dataflow::channels::pact::Pipeline;
+use timely::PartialOrder;
 
 use crate::trace::cursor::IntoOwned;
-
 use crate::lattice::Lattice;
 use crate::{ExchangeData, Collection};
 use crate::difference::{IsZero, Semigroup};
@@ -67,18 +67,50 @@ where
         let mut trace = self.trace.clone();
         let mut buffer = Vec::new();
 
-        self.stream.unary_frontier(Pipeline, "CountTotal", move |_,_| {
+        self.stream.unary_frontier(Pipeline, "CountTotal", move |capability,_| {
 
             // tracks the upper limit of known-complete timestamps.
             let mut upper_limit = timely::progress::frontier::Antichain::from_elem(<G::Timestamp as timely::progress::Timestamp>::minimum());
+            trace.read_upper(&mut upper_limit);
+            assert!(PartialOrder::less_equal(&trace.get_physical_compaction(), &upper_limit.borrow()));
 
+            let mut capability = Some(capability);
             move |input, output| {
+                if let Some(cap) = &capability {
+                    let mut session = output.session(cap);
+                    let (mut trace_cursor, trace_storage) = trace.cursor();
+                    while let Some(key) = trace_cursor.get_key(&trace_storage) {
+                        let mut count: Option<T1::Diff> = None;
+
+                        trace_cursor.map_times(&trace_storage, |time, diff| {
+                            if let Some(count) = count.as_ref() {
+                                if !count.is_zero() {
+                                    session.give(((key.into_owned(), count.clone()), time.into_owned(), R2::from(-1i8)));
+                                }
+                            }
+                            count.as_mut().map(|c| c.plus_equals(&diff));
+                            if count.is_none() { count = Some(diff.into_owned()); }
+                            if let Some(count) = count.as_ref() {
+                                if !count.is_zero() {
+                                    session.give(((key.into_owned(), count.clone()), time.into_owned(), R2::from(1i8)));
+                                }
+                            }
+                        });
+                        trace_cursor.step_key(&trace_storage);
+                    }
+
+                    capability = None;
+                }
 
                 use crate::trace::cursor::IntoOwned;
                 input.for_each(|capability, batches| {
                     batches.swap(&mut buffer);
                     let mut session = output.session(&capability);
                     for batch in buffer.drain(..) {
+                        if !PartialOrder::less_equal(&upper_limit, batch.lower()) {
+                            continue
+                        }
+
                         let mut batch_cursor = batch.cursor();
                         let (mut trace_cursor, trace_storage) = trace.cursor_through(batch.lower().borrow()).unwrap();
                         upper_limit.clone_from(batch.upper());
